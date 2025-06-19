@@ -26,12 +26,20 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json());
-
-// **BARU: Sajikan file statis dari folder 'public'**
 app.use(express.static(path.join(__dirname, 'public')));
 
+// --- Helper Function untuk Konversi File ---
+function fileToGenerativePart(filePath, mimeType) {
+  const buffer = fs.readFileSync(filePath);
+  return {
+    inlineData: {
+      data: buffer.toString('base64'),
+      mimeType
+    },
+  };
+}
 
-// Daftar MIME type yang diizinkan untuk dokumen
+// Daftar MIME type yang diizinkan
 const allowedDocMimeTypes = [
   'application/pdf',
   'text/plain',
@@ -39,13 +47,19 @@ const allowedDocMimeTypes = [
   'application/msword'
 ];
 
-// Daftar MIME type yang diizinkan untuk audio
 const allowedAudioMimeTypes = [
-  'audio/mpeg', // MP3
-  'audio/wav',  // WAV
-  'audio/mp4',  // MP4 (audio)
-  'audio/webm'  // WEBM
+  'audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/webm'
 ];
+
+// BARU: Daftar MIME type yang diizinkan untuk gambar
+const allowedImageMimeTypes = [
+    'image/png',
+    'image/jpeg',
+    'image/webp',
+    'image/heic',
+    'image/heif'
+];
+
 
 // Endpoint: Generate Text
 app.post('/generate-text', async (req, res) => {
@@ -66,6 +80,45 @@ app.post('/generate-text', async (req, res) => {
   }
 });
 
+// BARU: Endpoint: Process Image
+app.post('/generate-from-image', upload.single('image'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No image file uploaded' });
+    }
+
+    const filePath = req.file.path;
+    const mimeType = req.file.mimetype;
+
+    // Validasi tipe file gambar
+    if (!allowedImageMimeTypes.includes(mimeType)) {
+        fs.unlinkSync(filePath); // Hapus file yang tidak didukung
+        return res.status(400).json({ error: 'Unsupported image type. Only PNG, JPEG, WEBP, HEIC, HEIF are allowed.' });
+    }
+
+    try {
+        const imagePart = fileToGenerativePart(filePath, mimeType);
+        const prompt = req.body.prompt || 'Describe this image in detail.';
+
+        const result = await model.generateContent([prompt, imagePart]);
+        const response = await result.response;
+        const text = response.text();
+
+        res.json({ output: text });
+    } catch (error) {
+        console.error('Image processing error:', error);
+        if (error.message.includes('SAFETY')) {
+            res.status(400).json({ error: 'Content blocked by safety filters' });
+        } else {
+            res.status(500).json({ error: error.message });
+        }
+    } finally {
+        // Pastikan file dihapus setelah diproses
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+        }
+    }
+});
+
 // Endpoint: Process Document
 app.post('/generate-from-document', upload.single('document'), async (req, res) => {
   if (!req.file) {
@@ -75,32 +128,17 @@ app.post('/generate-from-document', upload.single('document'), async (req, res) 
   const filePath = req.file.path;
   const mimeType = req.file.mimetype;
 
-  // Validasi tipe file dokumen
   if (!allowedDocMimeTypes.includes(mimeType)) {
     fs.unlinkSync(filePath);
     return res.status(400).json({ error: 'Unsupported file type. Only PDF, TXT, DOC, DOCX are allowed.' });
   }
 
   try {
-    const buffer = fs.readFileSync(filePath);
-    const base64Data = buffer.toString('base64');
-
-    const documentPart = {
-      inlineData: {
-        data: base64Data,
-        mimeType: mimeType
-      }
-    };
-
-    const result = await model.generateContent({
-      contents: [{
-        role: 'user',
-        parts: [
-          { text: 'Analyze this document and provide key insights:' },
-          documentPart
-        ]
-      }]
-    });
+    const documentPart = fileToGenerativePart(filePath, mimeType);
+    const result = await model.generateContent([
+        'Analyze this document and provide key insights:', 
+        documentPart
+    ]);
     
     const response = await result.response;
     const text = response.text();
@@ -108,7 +146,6 @@ app.post('/generate-from-document', upload.single('document'), async (req, res) 
   } catch (error) {
     console.error('Document processing error:', error);
     
-    // Handle Gemini API errors specifically
     if (error.message.includes('SAFETY')) {
       res.status(400).json({ error: 'Content blocked by safety filters' });
     } else if (error.message.includes('large')) {
@@ -117,7 +154,6 @@ app.post('/generate-from-document', upload.single('document'), async (req, res) 
       res.status(500).json({ error: 'Error processing document' });
     }
   } finally {
-    // Pastikan file dihapus setelah diproses
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }
@@ -133,32 +169,17 @@ app.post('/generate-from-audio', upload.single('audio'), async (req, res) => {
   const filePath = req.file.path;
   const mimeType = req.file.mimetype;
 
-  // Validasi tipe file audio
   if (!allowedAudioMimeTypes.includes(mimeType)) {
     fs.unlinkSync(filePath);
     return res.status(400).json({ error: 'Unsupported audio format. Only MP3, WAV, MP4, WEBM are allowed.' });
   }
 
   try {
-    const buffer = fs.readFileSync(filePath);
-    const base64Audio = buffer.toString('base64');
-
-    const audioPart = {
-      inlineData: {
-        data: base64Audio,
-        mimeType: mimeType
-      }
-    };
-
-    const result = await model.generateContent({
-      contents: [{
-        role: 'user',
-        parts: [
-          { text: 'Transcribe or analyze the following audio:' },
-          audioPart
-        ]
-      }]
-    });
+    const audioPart = fileToGenerativePart(filePath, mimeType);
+    const result = await model.generateContent([
+        'Transcribe or analyze the following audio:', 
+        audioPart
+    ]);
 
     const response = await result.response;
     const text = response.text();
@@ -201,10 +222,9 @@ app.post('/chat', async (req, res) => {
     const response = await result.response;
     const text = response.text();
     
-    // Kirim kembali respons dan histori yang sudah diperbarui
     res.json({ 
       output: text,
-      history: [ // Bangun histori baru di backend untuk dikirim kembali
+      history: [
         ...(history || []),
         { role: 'user', parts: [{ text: message }] },
         { role: 'model', parts: [{ text: text }] }
@@ -220,13 +240,14 @@ app.post('/chat', async (req, res) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
+  // BARU: Menambahkan endpoint baru ke daftar log
   console.log(`API Endpoints:
   - POST /generate-text
+  - POST /generate-from-image
   - POST /generate-from-document
   - POST /generate-from-audio
   - POST /chat`);
   
-  // Buat folder uploads jika belum ada
   const uploadDir = path.join(__dirname, 'uploads');
   if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir);
